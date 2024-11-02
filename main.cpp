@@ -1,57 +1,74 @@
-#include <NAM/dsp.h>
 #include <RTNeural/RTNeural.h>
 #include <iostream>
 
-#include "wavenet/wavenet_model.hpp"
+struct TestMathsProvider
+{
+    template <typename Matrix>
+    static auto tanh (const Matrix& x)
+    {
+        return x.array().tanh();
+    }
+
+    template <typename Matrix>
+    static auto sigmoid (const Matrix& x)
+    {
+        using T = typename Matrix::Scalar;
+        return (T) 1 / (((T) -1 * x.array()).array().exp() + (T) 1);
+    }
+
+    template <typename Matrix>
+    static auto exp (const Matrix& x)
+    {
+        return x.array().exp();
+    }
+};
 
 int main()
 {
-    const auto model_path { std::string { ROOT_DIR } + "OB1 Mesa DC-5 PM.nam" };
+    const auto model_path { std::string { ROOT_DIR } + "AMP Orange Nasty.json" };
 
     std::cout << "Loading model from path: " << model_path << std::endl;
 
-    nam::dspData model_data;
-    auto nam_dsp = nam::get_dsp (model_path, model_data);
+    std::ifstream jsonStream (model_path, std::ifstream::binary);
 
-    wavenet::Wavenet_Model<float,
-                           1,
-                           RTNeural::DefaultMathsProvider,
-                           wavenet::Layer_Array<float, 1, 1, 8, 16, 3, false, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512>,
-                           wavenet::Layer_Array<float, 16, 1, 1, 8, 3, true, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512>>
-        rtneural_wavenet;
-    rtneural_wavenet.load_weights (model_data.config, model_data.weights);
-
-    nam_dsp->prewarm();
-    std::cout << std::endl;
+    nlohmann::json modelJson;
+    jsonStream >> modelJson;
 
     static constexpr size_t N = 2048;
-    std::vector<double> input;
+    std::vector<float> input;
     input.resize (N, 0.0);
-    std::vector<double> output_nam;
-    output_nam.resize (N, 0.0);
-    std::vector<float> output_rtneural;
-    output_rtneural.resize (N, 0.0);
+    std::vector<float> output_default;
+    output_default.resize (N, 0.0);
+    std::vector<float> output_custom;
+    output_custom.resize (N, 0.0);
 
     for (size_t n = 0; n < input.size(); ++n)
         input[n] = std::sin (3.14 * static_cast<double> (n) * 0.01);
 
-    auto start = std::chrono::high_resolution_clock::now();
-    nam_dsp->process (input.data(), output_nam.data(), N);
-    auto end = std::chrono::high_resolution_clock::now();
-    const auto duration_nam = std::chrono::duration_cast<std::chrono::duration<double>> (end - start).count();
-    std::cout << "NAM: " << duration_nam << std::endl;
+    RTNeural::ModelT<float, 1, 1, RTNeural::LSTMLayerT<float, 1, 16, RTNeural::SampleRateCorrectionMode::None, RTNeural::DefaultMathsProvider>, RTNeural::DenseT<float, 16, 1>> model_default;
+    model_default.parseJson (modelJson, true);
+    model_default.reset();
 
-    start = std::chrono::high_resolution_clock::now();
+    RTNeural::ModelT<float, 1, 1, RTNeural::LSTMLayerT<float, 1, 16, RTNeural::SampleRateCorrectionMode::None, TestMathsProvider>, RTNeural::DenseT<float, 16, 1>> model_custom;
+    model_custom.parseJson (modelJson, true);
+    model_default.reset();
+
+    float* data = input.data();
+
+    float err = 0;
+
     for (size_t n = 0; n < input.size(); ++n)
     {
         // nam_dsp->process (input.data() + n, output_nam.data() + n, 1);
-        output_rtneural[n] = rtneural_wavenet.forward (static_cast<float> (input[n]));
-    }
-    end = std::chrono::high_resolution_clock::now();
-    const auto duration_rtneural = std::chrono::duration_cast<std::chrono::duration<double>> (end - start).count();
-    std::cout << "RTNeural: " << duration_rtneural << std::endl;
+        output_default[n] = model_default.forward(data + n);
+        output_custom[n] = model_custom.forward (data + n);
 
-    std::cout << "RTNeural is: " << duration_nam / duration_rtneural << "x faster" << std::endl;
+        float delta = output_default[n] - output_custom[n];
+
+        err += (delta * delta);
+    }
+
+    std::cout << "Err is: " << sqrt(err);
 
     return 0;
 }
